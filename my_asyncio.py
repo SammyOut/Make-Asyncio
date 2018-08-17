@@ -14,7 +14,6 @@ async def algorithm(value: int) -> int:
     await async_sleep(5)
     return value + 42
 
-
 async def handler(client: socket.socket) -> None:
     while True:
         request: bytes = await async_recv(client, 100)
