@@ -1,11 +1,17 @@
 from collections import deque
+import functools
+import heapq
 import enum
 import select
 import socket
+import time
 from typing import *
 
+Task = TypeVar('Task')
 
-def algorithm(value: int) -> int:
+
+async def algorithm(value: int) -> int:
+    await async_sleep(5)
     return value + 42
 
 
@@ -35,10 +41,11 @@ async def server(address: Address) -> None:
 class Action(enum.Enum):
     WRITE = enum.auto()
     READ = enum.auto()
+    WAKEUP = enum.auto()
 
 
 class Can:
-    def __init__(self, action: Action, target: socket.socket):
+    def __init__(self, action: Action, target: Union[socket.socket, float]):
         self.action = action
         self.target = target
 
@@ -61,10 +68,29 @@ async def async_accept(sock: socket.socket) -> Tuple[socket.socket, Address]:
     return sock.accept()
 
 
-Task = TypeVar('Task')
+async def async_sleep(duration: float) -> None:
+    await Can(Action.WAKEUP, duration)
+
+
+@functools.total_ordering
+class TimerHandle:
+    def __init__(self, task: Task, due: float):
+        self.task = task
+        self. due = due
+
+    def __lt__(self, other):
+        return self.due < other.due
+
+    def __eq__(self, other):
+        return self.due == other.due
+
+
 TASKS: Deque[Task] = deque()
 WAIT_READ: Dict[socket.socket, Task] = {}
 WAIT_WRITE: Dict[socket.socket, Task] = {}
+WAIT_WAKEUP: List[TimerHandle] = []
+
+MAX_TIMEOUT = 24 * 3600
 
 
 def add_task(task: Task) -> None:
@@ -72,13 +98,27 @@ def add_task(task: Task) -> None:
 
 
 def run_tasks() -> None:
-    while any((TASKS, WAIT_READ, WAIT_WRITE)):
+    while any((TASKS, WAIT_READ, WAIT_WRITE, WAIT_WAKEUP)):
+        now = time.monotonic()
         while not TASKS:
-            readables, writables, _ = select.select(WAIT_READ, WAIT_WRITE, [])
+            if WAIT_WAKEUP:
+                timeout = max(0, WAIT_WAKEUP[0].due - now)
+                timeout = min(MAX_TIMEOUT, timeout)
+            else:
+                timeout = MAX_TIMEOUT
+            readables, writables, _ = select.select(WAIT_READ, WAIT_WRITE, [], timeout)
+            now = time.monotonic()
             for sock in readables:
                 add_task(WAIT_READ.pop(sock))
             for sock in writables:
                 add_task(WAIT_WRITE.pop(sock))
+            while WAIT_WAKEUP:
+                heapq.heappop(WAIT_WAKEUP)
+                timer_handle = WAIT_WAKEUP[0]
+                if timer_handle.due >= now:
+                    break
+                add_task(timer_handle.task)
+                heapq.heappop(WAIT_WAKEUP)
 
         current_task = TASKS.popleft()
         try:
@@ -89,7 +129,9 @@ def run_tasks() -> None:
         if action is Action.READ:
             WAIT_READ[target] = current_task
         elif action is Action.WRITE:
-            WAIT_WRITE[target] = current_taskp
+            WAIT_WRITE[target] = current_task
+        elif action is Action.WAKEUP:
+            heapq.heappush(WAIT_WAKEUP, TimerHandle(current_task, now + target))
         else:
             raise RuntimeError(f'Unexpected action {action!r}')
 
